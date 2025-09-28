@@ -514,6 +514,27 @@ class MainWindow(QMainWindow):  # type: ignore
         self.settings.setValue("ip_address", self.socket_dialog.ip_line.text())
         self.settings.setValue("port", self.socket_dialog.port_line.text())
 
+        # Disconnect signals to prevent further processing
+        try:
+            self.core.captureSession.videoSink().videoFrameChanged.disconnect(self.core.onFramePassedFromCamera)
+        except:
+            pass
+        try:
+            self.core.frameSender.OnFrameChanged.disconnect(self.core.frameWorker.setVideoFrame)
+        except:
+            pass
+        try:
+            self.core.sample_worker.OnSampleReady.disconnect(self.core.received_sample)
+        except:
+            pass
+        try:
+            self.core.sample_worker.OnSubsampleRecieved.disconnect(self.core.subsample_progress_update)
+        except:
+            pass
+
+        if self.core.camera.isActive():
+            self.core.camera.stop()
+
         self.core.workerThread.quit()
         self.core.workerThread.wait()
         self.core.sampleWorkerThread.quit()
@@ -523,13 +544,20 @@ class MainWindow(QMainWindow):  # type: ignore
 
 
 def start() -> None:
-    app = QApplication(sys.argv)
-    qdarktheme.setup_theme(additional_qss="QToolTip {color: black;}")
+    try:
+        app = QApplication(sys.argv)
+        app.setPalette(qdarktheme.load_palette())
+        app.setStyleSheet(qdarktheme.load_stylesheet() + "QToolTip {color: black;}")
 
-    window = MainWindow()
+        window = MainWindow()
 
-    window.show()
-    sys.exit(app.exec())
+        window.show()
+        sys.exit(app.exec())
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

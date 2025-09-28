@@ -271,7 +271,8 @@ class MainWindow(QMainWindow):  # type: ignore
 
 def start() -> None:
     app = QApplication(sys.argv)
-    qdarktheme.setup_theme(additional_qss="QToolTip {color: black;}")
+    app.setPalette(qdarktheme.load_palette())
+    app.setStyleSheet(qdarktheme.load_stylesheet() + "QToolTip {color: black;}")
 
     window = MainWindow()
 
