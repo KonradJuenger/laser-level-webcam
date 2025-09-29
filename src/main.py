@@ -233,7 +233,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.sensor_feed_widget.OnHeightChanged.connect(
             lambda value: setattr(self.core.frameWorker, "analyser_widget_height", value)
         )
-        self.smoothing.valueChanged.connect(lambda value: setattr(self.core.frameWorker, "analyser_smoothing", value))
+        self.smoothing.valueChanged.connect(self.core.frameWorker.set_analyser_smoothing)
         self.smoothing.valueChanged.connect(self.smoothing_value)
         self.subsamples_spin.valueChanged.connect(lambda value: setattr(self.core, "subsamples", value))
         self.outlier_spin.valueChanged.connect(lambda value: setattr(self.core, "outliers", value))
