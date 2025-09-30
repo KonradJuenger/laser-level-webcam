@@ -228,7 +228,7 @@ class AnalyserWidget(QWidget):  # type: ignore
             painter.drawText(int(x), int(y), self.text)
 
     def set_data(self, data: FrameData) -> None:
-        self.pixmap = data.pixmap
+        self.pixmap = QPixmap.fromImage(data.image)
         self.sample = data.sample
         self.zero = data.zero
         self.text = data.text

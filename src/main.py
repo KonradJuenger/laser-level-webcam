@@ -12,6 +12,8 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QAction
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QImage
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QButtonGroup
@@ -254,7 +256,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.sample_table.itemSelectionChanged.connect(self.hightlight_sample)
 
         # New
-        self.core.frameWorker.OnPixmapChanged.connect(self.sensor_feed_widget.setPixmap)
+        self.core.frameWorker.OnImageReady.connect(self.update_sensor_feed)
         self.core.frameWorker.OnCentreChanged.connect(self.core.sample_worker.sample_in)
 
         # Trigger the state of things
@@ -300,6 +302,9 @@ class MainWindow(QMainWindow):  # type: ignore
         self.update_graph_mode()  # have to trigger it manually the first time
 
         self.status_bar.showMessage("Loading first camera", 1000)  # 3 seconds
+
+    def update_sensor_feed(self, image: QImage) -> None:
+        self.sensor_feed_widget.setPixmap(QPixmap.fromImage(image))
 
     def smoothing_value(self, val: float) -> None:
         self.status_bar.showMessage(f"Smoothing: {val}", 1000)  # 3 seconds
@@ -514,31 +519,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.settings.setValue("ip_address", self.socket_dialog.ip_line.text())
         self.settings.setValue("port", self.socket_dialog.port_line.text())
 
-        # Disconnect signals to prevent further processing
-        try:
-            self.core.captureSession.videoSink().videoFrameChanged.disconnect(self.core.onFramePassedFromCamera)
-        except:
-            pass
-        try:
-            self.core.frameSender.OnFrameChanged.disconnect(self.core.frameWorker.setVideoFrame)
-        except:
-            pass
-        try:
-            self.core.sample_worker.OnSampleReady.disconnect(self.core.received_sample)
-        except:
-            pass
-        try:
-            self.core.sample_worker.OnSubsampleRecieved.disconnect(self.core.subsample_progress_update)
-        except:
-            pass
-
-        if self.core.camera.isActive():
-            self.core.camera.stop()
-
-        self.core.workerThread.quit()
-        self.core.workerThread.wait()
-        self.core.sampleWorkerThread.quit()
-        self.core.sampleWorkerThread.wait()
+        self.core.shutdown()
         self.deleteLater()
         super().closeEvent(event)
 

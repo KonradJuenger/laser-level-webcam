@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage
 
 
 @dataclass
 class FrameData:
-    def __init__(self, pixmap: QPixmap, sample: int, zero: int, text: str) -> None:
-        self.pixmap = pixmap
+    def __init__(self, image: QImage, sample: int, zero: int, text: str) -> None:
+        self.image = image
         self.sample = sample
         self.zero = zero
         self.text = text

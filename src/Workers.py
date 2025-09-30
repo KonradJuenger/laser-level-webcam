@@ -7,8 +7,8 @@ import qimage2ndarray
 from PySide6.QtCore import QObject
 from PySide6.QtCore import Signal
 from PySide6.QtCore import Slot
+from PySide6.QtCore import QThread
 from PySide6.QtGui import QImage
-from PySide6.QtGui import QPixmap
 from PySide6.QtGui import QTransform
 from PySide6.QtMultimedia import QVideoFrame
 
@@ -123,7 +123,7 @@ class FrameWorker(QObject):  # type: ignore
 
     OnFrameChanged = Signal(list)
     OnCentreChanged = Signal(int)
-    OnPixmapChanged = Signal(QPixmap)
+    OnImageReady = Signal(QImage)
     OnAnalyserUpdate = Signal(FrameData)
 
     def __init__(self, parent_obj: Any):
@@ -157,9 +157,16 @@ class FrameWorker(QObject):  # type: ignore
             None
 
         """
+        if getattr(self.parent_obj, "shutting_down", False) or QThread.currentThread().isInterruptionRequested():
+            self.ready = True
+            return
+
         self.ready = False
 
-        image = frame.toImage().convertToFormat(QImage.Format_Grayscale8)
+        image = frame.toImage().convertToFormat(QImage.Format_Grayscale8).copy()
+        rotated_image = image.transformed(QTransform().rotate(-90)).copy()
+        self.OnImageReady.emit(rotated_image)
+
         try:
             histo = np.mean(qimage2ndarray.raw_view(image), axis=0)
         except ValueError as e:
@@ -167,11 +174,9 @@ class FrameWorker(QObject):  # type: ignore
             self.ready = True
             return
 
-        pixmap = QPixmap.fromImage(image).transformed(QTransform().rotate(-90))
-        self.OnPixmapChanged.emit(pixmap)
-
         histo = np.convolve(histo, self._kernel, mode="valid")
         histo = np.nan_to_num(histo)
+        self.histo = histo
 
         min_value, max_value = histo.min(), histo.max()
         if max_value > min_value:
@@ -180,8 +185,6 @@ class FrameWorker(QObject):  # type: ignore
             scaled = np.zeros_like(histo)
 
         histo_uint8 = scaled.astype(np.uint8)
-        self.histo = histo_uint8
-
         histo_levels = histo_uint8.astype(np.uint16)
         scope_mask = self._scope_levels[None, :] < histo_levels[:, None]
         scopeData = scope_mask.astype(np.uint8) * 128
@@ -193,11 +196,9 @@ class FrameWorker(QObject):  # type: ignore
             scopeData.strides[0],
             QImage.Format_Grayscale8,
         )
+        scope_image = qimage.copy().mirrored(False, True)
 
-        a_pix = QPixmap.fromImage(qimage)
-        a_pix = a_pix.transformed(QTransform().scale(1, -1))
-
-        width = self.histo.shape[0]
+        width = histo.shape[0]
         self.data_width = width
 
         a_sample = 0
@@ -212,7 +213,7 @@ class FrameWorker(QObject):  # type: ignore
             centre_real = (self.parent_obj.sensor_width / width) * (self.centre - self.parent_obj.zero)
             a_text = get_units(self.parent_obj.units, centre_real)
 
-        frame_data = FrameData(a_pix, a_sample, a_zero, a_text)
+        frame_data = FrameData(scope_image, a_sample, a_zero, a_text)
         self.OnAnalyserUpdate.emit(frame_data)
 
         self.ready = True

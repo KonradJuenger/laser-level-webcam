@@ -87,6 +87,7 @@ class Core(QObject):  # type: ignore
         self.replacing_sample_index = 0  # the index of the sample we are replacing
         self.line_data = np.empty(0)  # numpy array of the fitted line through the samples
         self.samples: list[Sample] = []
+        self.shutting_down = False
 
         # Frame worker
         self.workerThread = QThread()
@@ -185,3 +186,37 @@ class Core(QObject):  # type: ignore
 
         self.captureSession.setCamera(self.camera)
         self.camera.start()
+
+    def shutdown(self) -> None:
+        """Stop capture and worker threads safely to allow application exit."""
+        if self.shutting_down:
+            return
+
+        self.shutting_down = True
+
+        try:
+            self.captureSession.videoSink().videoFrameChanged.disconnect(self.onFramePassedFromCamera)
+        except Exception:
+            pass
+        try:
+            self.frameSender.OnFrameChanged.disconnect(self.frameWorker.setVideoFrame)
+        except Exception:
+            pass
+
+        if self.camera and self.camera.isActive():
+            self.camera.stop()
+        self.captureSession.setCamera(None)
+        self.captureSession.setVideoSink(None)
+
+        self.workerThread.requestInterruption()
+        self.workerThread.quit()
+        if not self.workerThread.wait(2000):
+            self.workerThread.terminate()
+            self.workerThread.wait()
+
+        self.sampleWorkerThread.quit()
+        if not self.sampleWorkerThread.wait(2000):
+            self.sampleWorkerThread.terminate()
+            self.sampleWorkerThread.wait()
+
+        self.shutting_down = False
