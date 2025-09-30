@@ -196,6 +196,7 @@ class AnalyserWidget(QWidget):  # type: ignore
         self.sample = 0  # location of the sample in pixel space on the widget
         self.zero = 0  # location of zero. if not set, it's None
         self.text = ""  # Text to display if zero is set. shows the distance from zero
+        self.edges: tuple[int, int] | None = None
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -217,6 +218,12 @@ class AnalyserWidget(QWidget):  # type: ignore
             painter.setPen(Qt.red)
             painter.drawLine(0, self.zero, self.width(), self.zero)
 
+        if self.edges:
+            edge_pen = QPen(Qt.yellow, 0, Qt.DashLine)
+            painter.setPen(edge_pen)
+            for edge in self.edges:
+                painter.drawLine(0, edge, self.width(), edge)
+
         if self.text:
             painter.setFont(QFont("Arial", 12))
             painter.setPen(Qt.green)
@@ -232,7 +239,9 @@ class AnalyserWidget(QWidget):  # type: ignore
         self.sample = data.sample
         self.zero = data.zero
         self.text = data.text
+        self.edges = data.edges
         self.update()
+
 
 
 class TableUnit(QTableWidgetItem):  # type: ignore

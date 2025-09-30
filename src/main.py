@@ -6,9 +6,11 @@ import subprocess
 import sys
 
 import qdarktheme
+from PySide6.QtCore import QMetaObject
 from PySide6.QtCore import QSettings
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QUrl
+from PySide6.QtCore import Q_ARG
 from PySide6.QtGui import QAction
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtGui import QDesktopServices
@@ -17,6 +19,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QButtonGroup
+from PySide6.QtWidgets import QCheckBox
 from PySide6.QtWidgets import QComboBox
 from PySide6.QtWidgets import QDoubleSpinBox
 from PySide6.QtWidgets import QFileDialog
@@ -128,9 +131,12 @@ class MainWindow(QMainWindow):  # type: ignore
         camera_device_settings_btn.setToolTip(tt["cam_device"])
         sensor_layout = QVBoxLayout()
         sensor_layout.setContentsMargins(1, 6, 1, 1)
+        self.preview_checkbox = QCheckBox("Show Preview")
+        self.preview_checkbox.setChecked(True)
         sensor_form = QFormLayout()
         sensor_form.addRow("Camera", self.camera_combo)
         sensor_form.addRow("Channel", self.channel_combo)
+        sensor_form.addRow("Display", self.preview_checkbox)
         sensor_layout.addWidget(self.sensor_feed_widget)
         sensor_layout.addLayout(sensor_form)
         sensor_layout.addWidget(camera_device_settings_btn)
@@ -143,12 +149,18 @@ class MainWindow(QMainWindow):  # type: ignore
         self.smoothing.setToolTip(tt["smoothing"])
         self.smoothing.setRange(0, 200)
         self.smoothing.setTickInterval(1)
+        self.measure_mode_combo = QComboBox()
+        self.measure_mode_combo.addItems(["Gaussian Peak", "Edge Midpoint"])
+        self.measure_mode_combo.setToolTip("Select how the beam position is detected.")
         analyser_form = QFormLayout()
         analyser_layout = QVBoxLayout()
         analyser_layout.setContentsMargins(1, 6, 1, 1)
+        analyser_form.addRow("Measurement Mode", self.measure_mode_combo)
         analyser_form.addRow("Smoothing", self.smoothing)
         analyser_layout.addWidget(self.analyser_widget)
         analyser_layout.addLayout(analyser_form)
+        self.log_perf_button = QPushButton("Log Perf (3s)")
+        analyser_layout.addWidget(self.log_perf_button)
         analyser_widget.setLayout(analyser_layout)
 
         # -- Sampler --
@@ -258,14 +270,18 @@ class MainWindow(QMainWindow):  # type: ignore
         camera_device_settings_btn.clicked.connect(self.extra_controls)
         self.camera_combo.currentIndexChanged.connect(self.core.set_camera)
         self.channel_combo.currentTextChanged.connect(self.on_channel_changed)
+        self.preview_checkbox.toggled.connect(self.core.frameWorker.set_preview_enabled)
+        self.measure_mode_combo.currentTextChanged.connect(self.on_measurement_mode_changed)
         self.graph_mode_group.buttonClicked.connect(self.update_graph_mode)
         self.sample_table.itemSelectionChanged.connect(self.hightlight_sample)
+        self.log_perf_button.clicked.connect(self.log_performance_window)
 
         # New
         self.core.frameWorker.OnChannelsAvailable.connect(self.update_channel_options)
         self.core.frameWorker.OnImageReady.connect(self.update_sensor_feed)
         self.core.frameWorker.OnCentreChanged.connect(self.core.sample_worker.sample_in)
         self.core.frameWorker.set_channel(self.channel_combo.currentText())
+        self.core.frameWorker.set_measurement_mode(self.measure_mode_combo.currentText())
 
         # Trigger the state of things
         self.smoothing.setValue(50)
@@ -294,6 +310,11 @@ class MainWindow(QMainWindow):  # type: ignore
             index = self.channel_combo.findText(channel_text)
             if index != -1:
                 self.channel_combo.setCurrentIndex(index)
+        if settings.contains("measurement_mode"):
+            mode_text = settings.value("measurement_mode")
+            mode_index = self.measure_mode_combo.findText(mode_text)
+            if mode_index != -1:
+                self.measure_mode_combo.setCurrentIndex(mode_index)
         if settings.contains("raw"):
             if settings.value("raw") == "true":
                 self.raw_radio.setChecked(True)
@@ -319,10 +340,25 @@ class MainWindow(QMainWindow):  # type: ignore
     def update_sensor_feed(self, image: QImage) -> None:
         self.sensor_feed_widget.setPixmap(QPixmap.fromImage(image))
 
+
+    def log_performance_window(self) -> None:
+        QMetaObject.invokeMethod(
+            self.core.frameWorker,
+            "start_timed_logging",
+            Qt.QueuedConnection,
+            Q_ARG(float, 3.0),
+        )
+        self.status_bar.showMessage("Performance logging enabled for 3 seconds...", 3000)
+
     def on_channel_changed(self, channel: str) -> None:
         if not channel:
             return
         self.core.frameWorker.set_channel(channel)
+    def on_measurement_mode_changed(self, mode: str) -> None:
+        if not mode:
+            return
+        self.core.frameWorker.set_measurement_mode(mode)
+
 
     def update_channel_options(self, channels: list[str]) -> None:
         if not channels:
@@ -548,6 +584,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.settings.setValue("outlier", self.outlier_spin.value())
         self.settings.setValue("units", self.units_combo.currentIndex())
         self.settings.setValue("channel", self.channel_combo.currentText())
+        self.settings.setValue("measurement_mode", self.measure_mode_combo.currentText())
         self.settings.setValue("raw", self.raw_radio.isChecked())
 
         self.settings.setValue("left_splitter", self.left_splitter.sizes())

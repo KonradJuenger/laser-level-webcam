@@ -7,11 +7,12 @@ from PySide6.QtGui import QImage
 
 @dataclass
 class FrameData:
-    def __init__(self, image: QImage, sample: int, zero: int, text: str) -> None:
+    def __init__(self, image: QImage, sample: int, zero: int, text: str, edges: tuple[int, int] | None = None) -> None:
         self.image = image
         self.sample = sample
         self.zero = zero
         self.text = text
+        self.edges = edges
 
 
 @dataclass

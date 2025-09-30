@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from typing import Any
+from collections import deque
 
 import numpy as np
+import time
 import qimage2ndarray
 from PySide6.QtCore import QObject
 from PySide6.QtCore import Signal
@@ -11,6 +13,7 @@ from PySide6.QtCore import QThread
 from PySide6.QtGui import QImage
 from PySide6.QtGui import QTransform
 from PySide6.QtMultimedia import QVideoFrame
+from pathlib import Path
 
 from src.curves import fit_gaussian
 from src.DataClasses import FrameData
@@ -109,6 +112,7 @@ class SampleWorker(QObject):  # type: ignore
 
 
 class FrameWorker(QObject):  # type: ignore
+    ENABLE_TIMING = False
     """
     A worker class to process a QVideoFrame and emit the corresponding image data.
 
@@ -121,12 +125,15 @@ class FrameWorker(QObject):  # type: ignore
 
     """
 
+    TIMING_KEYS = ("format", "channel_extract", "emit", "profile", "centre", "histogram")
+
     OnFrameChanged = Signal(list)
     OnCentreChanged = Signal(int)
     OnImageReady = Signal(QImage)
     OnAnalyserUpdate = Signal(FrameData)
     OnChannelsAvailable = Signal(list)
 
+    previewEnabledChanged = Signal(bool)
     def __init__(self, parent_obj: Any):
         super().__init__(None)
         self.ready = True
@@ -139,6 +146,16 @@ class FrameWorker(QObject):  # type: ignore
         self.data_width = 0
         self.channel = "Intensity"
         self._available_channels: list[str] = ["Intensity"]
+        self.measurement_mode = "Gaussian Peak"
+        self.preview_enabled = True
+        self.preview_skip = 0
+        self.preview_interval = 0
+        self._timing_samples = {key: deque(maxlen=120) for key in self.TIMING_KEYS}
+        self._timing_frames = 0
+        self._timing_last_log = time.perf_counter()
+        self._timing_base_enabled = bool(self.ENABLE_TIMING)
+        self.logging_until = 0.0
+        self.log_path = Path(__file__).resolve().parent / "performance.log"
         self.set_analyser_smoothing(0)
 
     @Slot(int)
@@ -151,6 +168,16 @@ class FrameWorker(QObject):  # type: ignore
     @Slot(str)
     def set_channel(self, channel: str) -> None:
         self.channel = channel
+
+    @Slot(str)
+    def set_measurement_mode(self, mode: str) -> None:
+        self.measurement_mode = mode
+
+
+    @Slot(bool)
+    def set_preview_enabled(self, enabled: bool) -> None:
+        self.preview_enabled = enabled
+        self.preview_skip = 0
 
     @Slot(QVideoFrame)  # type: ignore
     def setVideoFrame(self, frame: QVideoFrame) -> None:
@@ -170,6 +197,9 @@ class FrameWorker(QObject):  # type: ignore
 
         self.ready = False
 
+        timing_active = self._timing_enabled()
+        timing_last = time.perf_counter() if timing_active else None
+
         source_image = frame.toImage()
         channel_count = source_image.pixelFormat().channelCount()
         available_channels = ["Intensity"]
@@ -181,18 +211,38 @@ class FrameWorker(QObject):  # type: ignore
             if self.channel not in available_channels:
                 self.channel = available_channels[0]
 
-        if channel_count <= 1:
-            processed_image = source_image.convertToFormat(QImage.Format_Grayscale8).copy()
-            plane = qimage2ndarray.raw_view(processed_image).astype(np.float64, copy=False)
-            channel_image = processed_image
+        if timing_active:
+            timing_last = self._timing_checkpoint("format", timing_last)
+
+        frame_mapped = False
+        frame_image = None
+        frame_image = frame.toImage()
+        if frame_image is None:
+            frame_image = frame.toImage()
+
+        if timing_active:
+            timing_last = self._timing_checkpoint("channel_extract", timing_last)
+        processed_image = frame_image.convertToFormat(QImage.Format_Grayscale8)
+        update_preview = False
+        if self.preview_enabled:
+            update_preview = (self.preview_skip % 2 == 0)
+            self.preview_skip = (self.preview_skip + 1) % 2
         else:
-            processed_image = source_image.convertToFormat(QImage.Format_RGBA8888).copy()
-            byte_view = qimage2ndarray.byte_view(processed_image)
-            height = processed_image.height()
-            width = processed_image.width()
-            bytes_per_line = processed_image.bytesPerLine()
-            rgba_view = byte_view.reshape((height, bytes_per_line))[:, : width * 4]
-            rgba_view = rgba_view.reshape((height, width, 4)).astype(np.float64)
+            self.preview_skip = 0
+
+        if update_preview:
+            rotated_image = processed_image.transformed(QTransform().rotate(-90))
+            self.OnImageReady.emit(rotated_image)
+            if timing_active:
+                timing_last = self._timing_checkpoint("emit", timing_last)
+        plane = qimage2ndarray.raw_view(processed_image).astype(np.float64, copy=False)
+
+        if self.channel != "Intensity":
+            channel_image = frame_image.convertToFormat(QImage.Format_RGB32)
+            byte_view = qimage2ndarray.byte_view(channel_image)
+            height = channel_image.height()
+            width = channel_image.width()
+            rgba_view = byte_view.reshape((height, width, 4)).astype(np.float64)
             colour_planes = rgba_view[:, :, :3]
             if self.channel == "Red":
                 plane = colour_planes[:, :, 0]
@@ -202,23 +252,18 @@ class FrameWorker(QObject):  # type: ignore
                 plane = colour_planes[:, :, 2]
             else:
                 plane = colour_planes.mean(axis=2)
-            plane_uint8 = np.clip(plane, 0, 255).astype(np.uint8)
-            plane_uint8 = np.require(plane_uint8, requirements=["C"])
-            channel_image = QImage(
-                plane_uint8.data,
-                width,
-                height,
-                plane_uint8.strides[0],
-                QImage.Format_Grayscale8,
-            ).copy()
+        if timing_active:
+            timing_last = self._timing_checkpoint("channel_extract", timing_last)
 
-        rotated_image = channel_image.transformed(QTransform().rotate(-90))
-        self.OnImageReady.emit(rotated_image)
+        # Preview is emitted once per frame as grayscale to avoid flicker.
 
         plane_mean = plane.mean(axis=0)
         histo = np.convolve(plane_mean, self._kernel, mode="valid")
         histo = np.nan_to_num(histo)
         self.histo = histo
+
+        if timing_active:
+            timing_last = self._timing_checkpoint("profile", timing_last)
 
         min_value, max_value = histo.min(), histo.max()
         if max_value > min_value:
@@ -243,22 +288,151 @@ class FrameWorker(QObject):  # type: ignore
         width = histo.shape[0]
         self.data_width = width
 
-        a_sample = 0
-        self.centre = fit_gaussian(self.histo)  # Specify the y position of the line
+        centre_value, edge_positions = self._calculate_centre(histo)
+        if centre_value is None or not np.isfinite(centre_value):
+            centre_value = float(fit_gaussian(self.histo))
+            edge_positions = None
+        self.centre = float(centre_value)
         self.OnCentreChanged.emit(self.centre)
-        if self.centre:
+
+        if timing_active:
+            timing_last = self._timing_checkpoint("centre", timing_last)
+
+        a_sample = 0
+        edge_lines: tuple[int, int] | None = None
+        if width > 0 and self.analyser_widget_height > 0:
             a_sample = int(self.analyser_widget_height - self.centre * self.analyser_widget_height / width)
+            if edge_positions is not None:
+                edge_lines = tuple(
+                    int(self.analyser_widget_height - edge * self.analyser_widget_height / width)
+                    for edge in edge_positions
+                )
 
         a_zero, a_text = 0, ""
-        if self.parent_obj.zero and self.centre:  # If we have zero, we can set it and the text
+        if self.parent_obj.zero and width > 0:
             a_zero = int(self.analyser_widget_height - self.parent_obj.zero * self.analyser_widget_height / width)
             centre_real = (self.parent_obj.sensor_width / width) * (self.centre - self.parent_obj.zero)
             a_text = get_units(self.parent_obj.units, centre_real)
 
-        frame_data = FrameData(scope_image, a_sample, a_zero, a_text)
+        frame_data = FrameData(scope_image, a_sample, a_zero, a_text, edge_lines)
         self.OnAnalyserUpdate.emit(frame_data)
 
+        if timing_active:
+            self._timing_checkpoint("histogram", timing_last)
+            self._maybe_log_timing()
+
         self.ready = True
+
+    def _calculate_centre(self, signal: np.ndarray) -> tuple[float | None, tuple[float, float] | None]:
+        if self.measurement_mode == "Edge Midpoint":
+            centre, edges = self._edge_midpoint(signal)
+            if centre is not None:
+                return centre, edges
+        return float(fit_gaussian(signal)), None
+
+    def _edge_midpoint(self, signal: np.ndarray) -> tuple[float | None, tuple[float, float] | None]:
+        if signal.size < 3:
+            return None, None
+        max_val = float(np.nanmax(signal))
+        min_val = float(np.nanmin(signal))
+        if not np.isfinite(max_val) or not np.isfinite(min_val) or max_val <= min_val:
+            return None, None
+        normalized = (signal - min_val) / (max_val - min_val)
+        threshold = 0.5
+        binary = normalized > threshold
+        transitions = np.diff(binary.astype(np.int8))
+        rising = np.where(transitions == 1)[0]
+        falling = np.where(transitions == -1)[0]
+
+        left = None
+        right = None
+
+        if rising.size:
+            left = self._interpolate_edge(normalized, rising[0], threshold)
+        elif binary[0]:
+            left = 0.0
+
+        if falling.size:
+            right = self._interpolate_edge(normalized, falling[-1], threshold)
+        elif binary[-1]:
+            right = float(len(normalized) - 1)
+
+        if left is None or right is None or right <= left:
+            return None, None
+
+        centre = (left + right) / 2.0
+        return centre, (left, right)
+
+    def _timing_enabled(self) -> bool:
+        if self._timing_base_enabled:
+            return True
+        if self.logging_until > 0.0:
+            now = time.perf_counter()
+            if now < self.logging_until:
+                return True
+            self.logging_until = 0.0
+        return False
+
+    def _timing_checkpoint(self, key: str, last_mark: float | None) -> float | None:
+        now = time.perf_counter()
+        if last_mark is not None:
+            samples = self._timing_samples.get(key)
+            if samples is not None:
+                samples.append(now - last_mark)
+        return now
+
+    @Slot(float)
+    def start_timed_logging(self, duration: float) -> None:
+        if duration <= 0:
+            return
+        now = time.perf_counter()
+        self.logging_until = max(self.logging_until, now + duration)
+        self._timing_frames = 0
+        for samples in self._timing_samples.values():
+            samples.clear()
+        self._timing_last_log = now
+
+    def _maybe_log_timing(self) -> None:
+        if not self._timing_enabled():
+            return
+        self._timing_frames += 1
+        now = time.perf_counter()
+        elapsed = now - self._timing_last_log
+        if elapsed < 1.0:
+            return
+        averages = {
+            key: (sum(samples) / len(samples) if samples else 0.0)
+            for key, samples in self._timing_samples.items()
+        }
+        fps = self._timing_frames / elapsed if elapsed > 0 else 0.0
+        msg = " ".join(f"{key}={averages[key] * 1000:.2f}ms" for key in self.TIMING_KEYS)
+        log_line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} fps={fps:.1f} {msg}\n"
+        try:
+            with self.log_path.open('a', encoding='utf-8') as fh:
+                fh.write(log_line)
+        except OSError:
+            pass
+        print(f"[FrameWorker] {log_line.strip()}", flush=True)
+        for samples in self._timing_samples.values():
+            samples.clear()
+        self._timing_frames = 0
+        self._timing_last_log = now
+        if not self._timing_base_enabled and self.logging_until > 0.0 and now >= self.logging_until:
+            self.logging_until = 0.0
+
+    @staticmethod
+    @staticmethod
+    def _interpolate_edge(values: np.ndarray, index: int, threshold: float) -> float:
+        if index < 0:
+            return 0.0
+        if index >= len(values) - 1:
+            return float(len(values) - 1)
+        v0 = float(values[index])
+        v1 = float(values[index + 1])
+        if v1 == v0:
+            return float(index)
+        return index + (threshold - v0) / (v1 - v0)
+
 
 
 class FrameSender(QObject):  # type: ignore
