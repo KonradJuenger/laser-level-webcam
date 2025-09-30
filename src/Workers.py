@@ -184,12 +184,15 @@ class FrameWorker(QObject):  # type: ignore
         if channel_count <= 1:
             processed_image = source_image.convertToFormat(QImage.Format_Grayscale8).copy()
             plane = qimage2ndarray.raw_view(processed_image).astype(np.float64, copy=False)
+            channel_image = processed_image
         else:
             processed_image = source_image.convertToFormat(QImage.Format_RGBA8888).copy()
             byte_view = qimage2ndarray.byte_view(processed_image)
             height = processed_image.height()
             width = processed_image.width()
-            rgba_view = byte_view.reshape((height, width, 4)).astype(np.float64)
+            bytes_per_line = processed_image.bytesPerLine()
+            rgba_view = byte_view.reshape((height, bytes_per_line))[:, : width * 4]
+            rgba_view = rgba_view.reshape((height, width, 4)).astype(np.float64)
             colour_planes = rgba_view[:, :, :3]
             if self.channel == "Red":
                 plane = colour_planes[:, :, 0]
@@ -199,8 +202,17 @@ class FrameWorker(QObject):  # type: ignore
                 plane = colour_planes[:, :, 2]
             else:
                 plane = colour_planes.mean(axis=2)
+            plane_uint8 = np.clip(plane, 0, 255).astype(np.uint8)
+            plane_uint8 = np.require(plane_uint8, requirements=["C"])
+            channel_image = QImage(
+                plane_uint8.data,
+                width,
+                height,
+                plane_uint8.strides[0],
+                QImage.Format_Grayscale8,
+            ).copy()
 
-        rotated_image = processed_image.transformed(QTransform().rotate(-90)).copy()
+        rotated_image = channel_image.transformed(QTransform().rotate(-90))
         self.OnImageReady.emit(rotated_image)
 
         plane_mean = plane.mean(axis=0)
