@@ -120,12 +120,17 @@ class MainWindow(QMainWindow):  # type: ignore
         self.sensor_feed_widget.setToolTip(tt["feed"])
         self.camera_combo = QComboBox()
         self.camera_combo.setToolTip(tt["cameras"])
+        self.channel_combo = QComboBox()
+        self.channel_combo.setToolTip("Select which colour channel to analyse.")
+        self.channel_combo.addItem("Intensity")
+        self.channel_combo.setEnabled(False)
         camera_device_settings_btn = QPushButton("Device Settings")
         camera_device_settings_btn.setToolTip(tt["cam_device"])
         sensor_layout = QVBoxLayout()
         sensor_layout.setContentsMargins(1, 6, 1, 1)
         sensor_form = QFormLayout()
         sensor_form.addRow("Camera", self.camera_combo)
+        sensor_form.addRow("Channel", self.channel_combo)
         sensor_layout.addWidget(self.sensor_feed_widget)
         sensor_layout.addLayout(sensor_form)
         sensor_layout.addWidget(camera_device_settings_btn)
@@ -252,12 +257,15 @@ class MainWindow(QMainWindow):  # type: ignore
         self.core.OnUnitsChanged.connect(self.graph.set_units)
         camera_device_settings_btn.clicked.connect(self.extra_controls)
         self.camera_combo.currentIndexChanged.connect(self.core.set_camera)
+        self.channel_combo.currentTextChanged.connect(self.on_channel_changed)
         self.graph_mode_group.buttonClicked.connect(self.update_graph_mode)
         self.sample_table.itemSelectionChanged.connect(self.hightlight_sample)
 
         # New
+        self.core.frameWorker.OnChannelsAvailable.connect(self.update_channel_options)
         self.core.frameWorker.OnImageReady.connect(self.update_sensor_feed)
         self.core.frameWorker.OnCentreChanged.connect(self.core.sample_worker.sample_in)
+        self.core.frameWorker.set_channel(self.channel_combo.currentText())
 
         # Trigger the state of things
         self.smoothing.setValue(50)
@@ -281,6 +289,11 @@ class MainWindow(QMainWindow):  # type: ignore
             self.outlier_spin.setValue(int(settings.value("outlier")))
         if settings.contains("units"):
             self.units_combo.setCurrentIndex(int(settings.value("units")))
+        if settings.contains("channel"):
+            channel_text = settings.value("channel")
+            index = self.channel_combo.findText(channel_text)
+            if index != -1:
+                self.channel_combo.setCurrentIndex(index)
         if settings.contains("raw"):
             if settings.value("raw") == "true":
                 self.raw_radio.setChecked(True)
@@ -305,6 +318,30 @@ class MainWindow(QMainWindow):  # type: ignore
 
     def update_sensor_feed(self, image: QImage) -> None:
         self.sensor_feed_widget.setPixmap(QPixmap.fromImage(image))
+
+    def on_channel_changed(self, channel: str) -> None:
+        if not channel:
+            return
+        self.core.frameWorker.set_channel(channel)
+
+    def update_channel_options(self, channels: list[str]) -> None:
+        if not channels:
+            return
+        existing = [self.channel_combo.itemText(i) for i in range(self.channel_combo.count())]
+        if existing == channels:
+            self.channel_combo.setEnabled(len(channels) > 1)
+            return
+        previous_block = self.channel_combo.blockSignals(True)
+        selected_before = self.channel_combo.currentText()
+        self.channel_combo.clear()
+        self.channel_combo.addItems(channels)
+        if selected_before in channels:
+            self.channel_combo.setCurrentText(selected_before)
+        else:
+            self.channel_combo.setCurrentIndex(0)
+            self.core.frameWorker.set_channel(self.channel_combo.currentText())
+        self.channel_combo.setEnabled(len(channels) > 1)
+        self.channel_combo.blockSignals(previous_block)
 
     def smoothing_value(self, val: float) -> None:
         self.status_bar.showMessage(f"Smoothing: {val}", 1000)  # 3 seconds
@@ -510,6 +547,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.settings.setValue("subsamples", self.subsamples_spin.value())
         self.settings.setValue("outlier", self.outlier_spin.value())
         self.settings.setValue("units", self.units_combo.currentIndex())
+        self.settings.setValue("channel", self.channel_combo.currentText())
         self.settings.setValue("raw", self.raw_radio.isChecked())
 
         self.settings.setValue("left_splitter", self.left_splitter.sizes())

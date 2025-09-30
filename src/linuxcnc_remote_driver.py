@@ -30,6 +30,10 @@ from PySide6.QtWidgets import QPushButton
 from PySide6.QtWidgets import QVBoxLayout
 from PySide6.QtWidgets import QWidget
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from src.CNC_jobs.probe import ProbeJob
 
 # from src.CNC_jobs.probe_and_machine import ProbeAndMachineJob

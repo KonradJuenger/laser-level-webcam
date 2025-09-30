@@ -125,6 +125,7 @@ class FrameWorker(QObject):  # type: ignore
     OnCentreChanged = Signal(int)
     OnImageReady = Signal(QImage)
     OnAnalyserUpdate = Signal(FrameData)
+    OnChannelsAvailable = Signal(list)
 
     def __init__(self, parent_obj: Any):
         super().__init__(None)
@@ -136,6 +137,8 @@ class FrameWorker(QObject):  # type: ignore
         self.analyser_widget_height = 0
         self.parent_obj = parent_obj
         self.data_width = 0
+        self.channel = "Intensity"
+        self._available_channels: list[str] = ["Intensity"]
         self.set_analyser_smoothing(0)
 
     @Slot(int)
@@ -144,6 +147,10 @@ class FrameWorker(QObject):  # type: ignore
         size = 2 * radius + 1
         self.analyser_smoothing = radius
         self._kernel = np.ones(size, dtype=np.float64) / size
+
+    @Slot(str)
+    def set_channel(self, channel: str) -> None:
+        self.channel = channel
 
     @Slot(QVideoFrame)  # type: ignore
     def setVideoFrame(self, frame: QVideoFrame) -> None:
@@ -163,18 +170,41 @@ class FrameWorker(QObject):  # type: ignore
 
         self.ready = False
 
-        image = frame.toImage().convertToFormat(QImage.Format_Grayscale8).copy()
-        rotated_image = image.transformed(QTransform().rotate(-90)).copy()
+        source_image = frame.toImage()
+        channel_count = source_image.pixelFormat().channelCount()
+        available_channels = ["Intensity"]
+        if channel_count >= 3:
+            available_channels.extend(["Red", "Green", "Blue"])
+        if available_channels != self._available_channels:
+            self._available_channels = available_channels
+            self.OnChannelsAvailable.emit(available_channels)
+            if self.channel not in available_channels:
+                self.channel = available_channels[0]
+
+        if channel_count <= 1:
+            processed_image = source_image.convertToFormat(QImage.Format_Grayscale8).copy()
+            plane = qimage2ndarray.raw_view(processed_image).astype(np.float64, copy=False)
+        else:
+            processed_image = source_image.convertToFormat(QImage.Format_RGBA8888).copy()
+            byte_view = qimage2ndarray.byte_view(processed_image)
+            height = processed_image.height()
+            width = processed_image.width()
+            rgba_view = byte_view.reshape((height, width, 4)).astype(np.float64)
+            colour_planes = rgba_view[:, :, :3]
+            if self.channel == "Red":
+                plane = colour_planes[:, :, 0]
+            elif self.channel == "Green":
+                plane = colour_planes[:, :, 1]
+            elif self.channel == "Blue":
+                plane = colour_planes[:, :, 2]
+            else:
+                plane = colour_planes.mean(axis=2)
+
+        rotated_image = processed_image.transformed(QTransform().rotate(-90)).copy()
         self.OnImageReady.emit(rotated_image)
 
-        try:
-            histo = np.mean(qimage2ndarray.raw_view(image), axis=0)
-        except ValueError as e:
-            print("Invalid QImage:", e)
-            self.ready = True
-            return
-
-        histo = np.convolve(histo, self._kernel, mode="valid")
+        plane_mean = plane.mean(axis=0)
+        histo = np.convolve(plane_mean, self._kernel, mode="valid")
         histo = np.nan_to_num(histo)
         self.histo = histo
 
@@ -217,7 +247,6 @@ class FrameWorker(QObject):  # type: ignore
         self.OnAnalyserUpdate.emit(frame_data)
 
         self.ready = True
-
 
 
 class FrameSender(QObject):  # type: ignore
