@@ -266,7 +266,10 @@ class FrameWorker(QObject):  # type: ignore
             timing_last = self._timing_checkpoint("channel_extract", timing_last)
 
         plane_mean = plane.mean(axis=0)
-        histo = np.convolve(plane_mean, self._kernel, mode="valid")
+        pad_width = plane_mean.size
+        padded = np.pad(plane_mean, pad_width, mode='constant', constant_values=0.0)
+        histo = np.convolve(padded, self._kernel, mode="same")
+        histo = histo[pad_width:pad_width + plane_mean.size]
         histo = np.nan_to_num(histo)
         self.histo = histo
 
