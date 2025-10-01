@@ -149,6 +149,12 @@ class MainWindow(QMainWindow):  # type: ignore
         self.smoothing.setToolTip(tt["smoothing"])
         self.smoothing.setRange(0, 200)
         self.smoothing.setTickInterval(1)
+        self.threshold_checkbox = QCheckBox("Threshold")
+        self.threshold_checkbox.setToolTip("Zero out pixels below this level before smoothing.")
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setToolTip("Threshold value (0-255).")
+        self.threshold_spin.setRange(0, 255)
+        self.threshold_spin.setEnabled(False)
         self.measure_mode_combo = QComboBox()
         self.measure_mode_combo.addItems(["Gaussian Peak", "Edge Midpoint"])
         self.measure_mode_combo.setToolTip("Select how the beam position is detected.")
@@ -157,6 +163,7 @@ class MainWindow(QMainWindow):  # type: ignore
         analyser_layout.setContentsMargins(1, 6, 1, 1)
         analyser_form.addRow("Measurement Mode", self.measure_mode_combo)
         analyser_form.addRow("Smoothing", self.smoothing)
+        analyser_form.addRow(self.threshold_checkbox, self.threshold_spin)
         analyser_layout.addWidget(self.analyser_widget)
         analyser_layout.addLayout(analyser_form)
         self.log_perf_button = QPushButton("Log Perf (3s)")
@@ -254,6 +261,8 @@ class MainWindow(QMainWindow):  # type: ignore
         )
         self.smoothing.valueChanged.connect(self.core.frameWorker.set_analyser_smoothing)
         self.smoothing.valueChanged.connect(self.smoothing_value)
+        self.threshold_checkbox.toggled.connect(self.on_threshold_toggled)
+        self.threshold_spin.valueChanged.connect(self.core.frameWorker.set_threshold_value)
         self.subsamples_spin.valueChanged.connect(lambda value: setattr(self.core, "subsamples", value))
         self.outlier_spin.valueChanged.connect(lambda value: setattr(self.core, "outliers", value))
         self.units_combo.currentTextChanged.connect(self.core.set_units)
@@ -282,6 +291,8 @@ class MainWindow(QMainWindow):  # type: ignore
         self.core.frameWorker.OnCentreChanged.connect(self.core.sample_worker.sample_in)
         self.core.frameWorker.set_channel(self.channel_combo.currentText())
         self.core.frameWorker.set_measurement_mode(self.measure_mode_combo.currentText())
+        self.core.frameWorker.set_threshold_value(self.threshold_spin.value())
+        self.on_threshold_toggled(self.threshold_checkbox.isChecked())
 
         # Trigger the state of things
         self.smoothing.setValue(50)
@@ -303,6 +314,11 @@ class MainWindow(QMainWindow):  # type: ignore
             self.subsamples_spin.setValue(int(settings.value("subsamples")))
         if settings.contains("outlier"):
             self.outlier_spin.setValue(int(settings.value("outlier")))
+        if settings.contains("threshold_value"):
+            self.threshold_spin.setValue(int(settings.value("threshold_value")))
+        if settings.contains("threshold_enabled"):
+            enabled = settings.value("threshold_enabled", False, type=bool)
+            self.threshold_checkbox.setChecked(bool(enabled))
         if settings.contains("units"):
             self.units_combo.setCurrentIndex(int(settings.value("units")))
         if settings.contains("channel"):
@@ -354,6 +370,11 @@ class MainWindow(QMainWindow):  # type: ignore
         if not channel:
             return
         self.core.frameWorker.set_channel(channel)
+
+    def on_threshold_toggled(self, enabled: bool) -> None:
+        self.threshold_spin.setEnabled(enabled)
+        self.core.frameWorker.set_threshold_enabled(enabled)
+
     def on_measurement_mode_changed(self, mode: str) -> None:
         if not mode:
             return
@@ -582,6 +603,8 @@ class MainWindow(QMainWindow):  # type: ignore
         self.settings.setValue("smoothing", self.smoothing.value())
         self.settings.setValue("subsamples", self.subsamples_spin.value())
         self.settings.setValue("outlier", self.outlier_spin.value())
+        self.settings.setValue("threshold_enabled", self.threshold_checkbox.isChecked())
+        self.settings.setValue("threshold_value", self.threshold_spin.value())
         self.settings.setValue("units", self.units_combo.currentIndex())
         self.settings.setValue("channel", self.channel_combo.currentText())
         self.settings.setValue("measurement_mode", self.measure_mode_combo.currentText())

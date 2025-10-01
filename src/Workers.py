@@ -141,6 +141,8 @@ class FrameWorker(QObject):  # type: ignore
         self.preview_enabled = True
         self.preview_skip = 0
         self.preview_interval = 0
+        self.threshold_enabled = False
+        self.threshold_value = 0.0
         self._timing_samples = {key: deque(maxlen=120) for key in self.TIMING_KEYS}
         self._timing_frames = 0
         self._timing_last_log = time.perf_counter()
@@ -169,6 +171,15 @@ class FrameWorker(QObject):  # type: ignore
         self.preview_enabled = enabled
         self.preview_skip = 0
         self.previewEnabledChanged.emit(enabled)
+
+    @Slot(bool)
+    def set_threshold_enabled(self, enabled: bool) -> None:
+        self.threshold_enabled = bool(enabled)
+
+    @Slot(int)
+    def set_threshold_value(self, value: int) -> None:
+        clamped = max(0, min(255, int(value)))
+        self.threshold_value = float(clamped)
 
     @Slot(object)  # type: ignore[arg-type]
     def process_frame(self, frame: np.ndarray) -> None:
@@ -221,6 +232,14 @@ class FrameWorker(QObject):  # type: ignore
                 channel_data = frame[:, :, :3].mean(axis=2)
             plane_source = channel_data.astype(np.float32, copy=False)
             preview_plane_u8 = np.ascontiguousarray(np.clip(plane_source, 0, 255).astype(np.uint8))
+
+        if self.threshold_enabled and self.threshold_value > 0.0:
+            threshold = self.threshold_value
+            mask = plane_source >= threshold
+            plane_source[...] = np.where(mask, 255.0, 0.0)
+            preview_plane_u8[...] = np.where(mask, 255, 0).astype(np.uint8)
+
+        if self.channel != "Intensity" and frame.ndim >= 3:
             height, width = preview_plane_u8.shape
             preview_rgb = np.zeros((height, width, 3), dtype=np.uint8)
             if self.channel == "Red":
