@@ -6,6 +6,7 @@ from collections import deque
 import cv2
 import numpy as np
 import time
+from filterpy.kalman import KalmanFilter
 from PySide6.QtCore import QObject
 from PySide6.QtCore import Signal
 from PySide6.QtCore import Slot
@@ -143,8 +144,14 @@ class FrameWorker(QObject):  # type: ignore
         self.preview_interval = 0
         self.threshold_enabled = False
         self.threshold_value = 0.0
-        self._timing_samples = {key: deque(maxlen=120) for key in self.TIMING_KEYS}
         self.padding_mode = 'zeros'
+        self.kalman_enabled = False
+        self.kalman_process_noise = 0.05
+        self.kalman_measurement_noise = 1.0
+        self.kalman_initial_covariance = 50.0
+        self._kalman_filter: KalmanFilter | None = None
+        self._kalman_last_time = None
+        self._timing_samples = {key: deque(maxlen=120) for key in self.TIMING_KEYS}
         self._timing_frames = 0
         self._timing_last_log = time.perf_counter()
         self._timing_base_enabled = bool(self.ENABLE_TIMING)
@@ -188,6 +195,30 @@ class FrameWorker(QObject):  # type: ignore
     def set_threshold_value(self, value: int) -> None:
         clamped = max(0, min(255, int(value)))
         self.threshold_value = float(clamped)
+
+    @Slot(bool)
+    def set_kalman_enabled(self, enabled: bool) -> None:
+        self.kalman_enabled = bool(enabled)
+        if not self.kalman_enabled:
+            self._kalman_filter = None
+            self._kalman_last_time = None
+
+    @Slot(float)
+    def set_kalman_process_noise(self, value: float) -> None:
+        self.kalman_process_noise = max(1e-6, float(value))
+        if self._kalman_filter is not None:
+            self._kalman_filter.Q = self._compute_process_noise(0.0)
+
+    @Slot(float)
+    def set_kalman_measurement_noise(self, value: float) -> None:
+        self.kalman_measurement_noise = max(1e-6, float(value))
+        if self._kalman_filter is not None:
+            self._kalman_filter.R = np.array([[self.kalman_measurement_noise]])
+
+    @Slot(float)
+    def set_kalman_initial_covariance(self, value: float) -> None:
+        self.kalman_initial_covariance = max(1e-6, float(value))
+        # Do not retroactively change current filter; will be applied on next reset
 
     @Slot(object)  # type: ignore[arg-type]
     def process_frame(self, frame: np.ndarray) -> None:
@@ -275,9 +306,12 @@ class FrameWorker(QObject):  # type: ignore
 
         plane_mean = plane.mean(axis=0)
         pad_width = plane_mean.size
-        pad_mode = 'constant' if self.padding_mode == 'zeros' else ('edge' if self.padding_mode == 'edge' else 'reflect')
-        pad_kwargs = {'constant_values': 0.0} if pad_mode == 'constant' else {}
-        padded = np.pad(plane_mean, pad_width, mode=pad_mode, **pad_kwargs)
+        if self.padding_mode == 'zeros':
+            padded = np.pad(plane_mean, pad_width, mode='constant', constant_values=0.0)
+        elif self.padding_mode == 'edge':
+            padded = np.pad(plane_mean, pad_width, mode='edge')
+        else:
+            padded = np.pad(plane_mean, pad_width, mode='reflect')
         histo = np.convolve(padded, self._kernel, mode="same")
         histo = histo[pad_width:pad_width + plane_mean.size]
         histo = np.nan_to_num(histo)
@@ -309,10 +343,17 @@ class FrameWorker(QObject):  # type: ignore
         width = histo.shape[0]
         self.data_width = width
 
-        centre_value, edge_positions = self._calculate_centre(histo)
-        if centre_value is None or not np.isfinite(centre_value):
+        centre_measurement, edge_positions = self._calculate_centre(histo)
+        if centre_measurement is None or not np.isfinite(centre_measurement):
+            self._kalman_filter = None
+            self._kalman_last_time = None
             centre_value = float(fit_gaussian(self.histo))
             edge_positions = None
+        else:
+            centre_value = float(centre_measurement)
+        if not np.isfinite(centre_value):
+            centre_value = 0.0
+        centre_value = self._apply_kalman(centre_value)
         self.centre = float(centre_value)
         self.OnCentreChanged.emit(self.centre)
 
@@ -452,6 +493,42 @@ class FrameWorker(QObject):  # type: ignore
         self._timing_last_log = now
         if not self._timing_base_enabled and self.logging_until > 0.0 and now >= self.logging_until:
             self.logging_until = 0.0
+
+    def _compute_process_noise(self, dt: float) -> np.ndarray:
+        q = self.kalman_process_noise
+        if dt <= 0.0:
+            dt = 1.0
+        dt2 = dt * dt
+        return np.array([[dt2 * q, dt * q],[dt * q, q]], dtype=np.float64)
+
+    def _apply_kalman(self, measurement: float) -> float:
+        if not self.kalman_enabled or not np.isfinite(measurement):
+            self._kalman_filter = None
+            self._kalman_last_time = None
+            return float(measurement)
+        now = time.perf_counter()
+        if self._kalman_filter is None:
+            kf = KalmanFilter(dim_x=2, dim_z=1)
+            kf.x = np.array([[measurement],[0.0]], dtype=np.float64)
+            kf.F = np.array([[1.0, 1.0],[0.0, 1.0]], dtype=np.float64)
+            kf.H = np.array([[1.0, 0.0]], dtype=np.float64)
+            kf.P = np.eye(2, dtype=np.float64) * self.kalman_initial_covariance
+            kf.Q = self._compute_process_noise(1.0)
+            kf.R = np.array([[self.kalman_measurement_noise]], dtype=np.float64)
+            self._kalman_filter = kf
+            self._kalman_last_time = now
+            return float(measurement)
+        assert self._kalman_filter is not None
+        dt = 0.0 if self._kalman_last_time is None else now - self._kalman_last_time
+        self._kalman_last_time = now
+        if dt <= 0.0:
+            dt = 1.0
+        self._kalman_filter.F = np.array([[1.0, dt],[0.0, 1.0]], dtype=np.float64)
+        self._kalman_filter.Q = self._compute_process_noise(dt)
+        self._kalman_filter.R = np.array([[self.kalman_measurement_noise]], dtype=np.float64)
+        self._kalman_filter.predict()
+        self._kalman_filter.update(np.array([[measurement]], dtype=np.float64))
+        return float(self._kalman_filter.x[0,0])
 
     @staticmethod
     def _interpolate_edge(values: np.ndarray, index: int, threshold: float) -> float:

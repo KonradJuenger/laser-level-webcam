@@ -7,3 +7,4 @@ qdarktheme>=2.1.0
 matplotlib>=3.5.3
 plotly
 opencv-python>=4.10.0
+filterpy>=1.4.5

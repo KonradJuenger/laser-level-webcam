@@ -155,6 +155,27 @@ class MainWindow(QMainWindow):  # type: ignore
         self.threshold_spin.setToolTip("Threshold value (0-255).")
         self.threshold_spin.setRange(0, 255)
         self.threshold_spin.setEnabled(False)
+        self.kalman_checkbox = QCheckBox("Kalman Filter")
+        self.kalman_checkbox.setToolTip("Enable predictive smoothing of the detected centre.")
+        self.kalman_process_spin = QDoubleSpinBox()
+        self.kalman_process_spin.setDecimals(4)
+        self.kalman_process_spin.setRange(1e-6, 10.0)
+        self.kalman_process_spin.setSingleStep(0.01)
+        self.kalman_process_spin.setValue(0.05)
+        self.kalman_process_spin.setToolTip("Process noise (Q). Higher values track faster motion.")
+        self.kalman_measure_spin = QDoubleSpinBox()
+        self.kalman_measure_spin.setDecimals(4)
+        self.kalman_measure_spin.setRange(1e-6, 10.0)
+        self.kalman_measure_spin.setSingleStep(0.01)
+        self.kalman_measure_spin.setValue(1.0)
+        self.kalman_measure_spin.setToolTip("Measurement noise (R). Lower values trust measurements more.")
+        self.kalman_cov_spin = QDoubleSpinBox()
+        self.kalman_cov_spin.setDecimals(2)
+        self.kalman_cov_spin.setRange(1e-6, 5000.0)
+        self.kalman_cov_spin.setSingleStep(1.0)
+        self.kalman_cov_spin.setValue(50.0)
+        self.kalman_cov_spin.setToolTip("Initial covariance (P0). Higher values start with more uncertainty.")
+        self._update_kalman_inputs(False)
         self.padding_combo = QComboBox()
         self.padding_combo.addItems(['Zero (Black)', 'Edge Replicate', 'Reflect'])
         self.padding_combo.setToolTip('Select padding strategy for smoothing.')
@@ -168,6 +189,10 @@ class MainWindow(QMainWindow):  # type: ignore
         analyser_form.addRow("Smoothing", self.smoothing)
         analyser_form.addRow(self.threshold_checkbox, self.threshold_spin)
         analyser_form.addRow('Padding', self.padding_combo)
+        analyser_form.addRow(self.kalman_checkbox)
+        analyser_form.addRow('Kalman Q', self.kalman_process_spin)
+        analyser_form.addRow('Kalman R', self.kalman_measure_spin)
+        analyser_form.addRow('Kalman P0', self.kalman_cov_spin)
         analyser_layout.addWidget(self.analyser_widget)
         analyser_layout.addLayout(analyser_form)
         self.log_perf_button = QPushButton("Log Perf (3s)")
@@ -268,6 +293,10 @@ class MainWindow(QMainWindow):  # type: ignore
         self.threshold_checkbox.toggled.connect(self.on_threshold_toggled)
         self.threshold_spin.valueChanged.connect(self.core.frameWorker.set_threshold_value)
         self.padding_combo.currentTextChanged.connect(self.on_padding_changed)
+        self.kalman_checkbox.toggled.connect(self.on_kalman_toggled)
+        self.kalman_process_spin.valueChanged.connect(self.core.frameWorker.set_kalman_process_noise)
+        self.kalman_measure_spin.valueChanged.connect(self.core.frameWorker.set_kalman_measurement_noise)
+        self.kalman_cov_spin.valueChanged.connect(self.core.frameWorker.set_kalman_initial_covariance)
         self.subsamples_spin.valueChanged.connect(lambda value: setattr(self.core, "subsamples", value))
         self.outlier_spin.valueChanged.connect(lambda value: setattr(self.core, "outliers", value))
         self.units_combo.currentTextChanged.connect(self.core.set_units)
@@ -385,6 +414,14 @@ class MainWindow(QMainWindow):  # type: ignore
     def on_padding_changed(self, label: str) -> None:
         key = self._padding_mode_key(label)
         self.core.frameWorker.set_padding_mode(key)
+
+    def on_kalman_toggled(self, enabled: bool) -> None:
+        self._update_kalman_inputs(enabled)
+        self.core.frameWorker.set_kalman_enabled(enabled)
+
+    def _update_kalman_inputs(self, enabled: bool) -> None:
+        for widget in (self.kalman_process_spin, self.kalman_measure_spin, self.kalman_cov_spin):
+            widget.setEnabled(enabled)
 
     @staticmethod
     def _padding_mode_key(label: str) -> str:
