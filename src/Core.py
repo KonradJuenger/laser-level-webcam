@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import threading
+from typing import List
+
+import cv2
 import numpy as np
 from PySide6.QtCore import QObject
 from PySide6.QtCore import QThread
 from PySide6.QtCore import Signal
 from PySide6.QtCore import Slot
-from PySide6.QtGui import QPixmap
-from PySide6.QtMultimedia import QCamera
-from PySide6.QtMultimedia import QMediaCaptureSession
 from PySide6.QtMultimedia import QMediaDevices
-from PySide6.QtMultimedia import QVideoFrame
-from PySide6.QtMultimedia import QVideoSink
 from scipy.stats import linregress
 
 from src.DataClasses import Sample
@@ -62,8 +61,87 @@ def samples_recalc(samples: list[Sample]) -> None:
             s.scrape = s.linYError - minYError
 
 
+class OpenCVCaptureThread(QThread):  # type: ignore
+    frameCaptured = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._pending_index: int | None = None
+        self._should_stop = False
+        self._capture: cv2.VideoCapture | None = None
+
+    def start_capture(self, index: int) -> None:
+        with self._lock:
+            self._pending_index = index
+            self._should_stop = False
+        if not self.isRunning():
+            self.start()
+
+    def set_device(self, index: int) -> None:
+        self.start_capture(index)
+
+    def stop(self) -> None:
+        with self._lock:
+            self._should_stop = True
+        self.wait()
+
+    def run(self) -> None:  # noqa: D401 - QThread run loop
+        while True:
+            with self._lock:
+                if self._should_stop:
+                    break
+                pending = self._pending_index
+                self._pending_index = None
+            if pending is not None:
+                self._open_capture(pending)
+            capture = self._capture
+            if capture is None:
+                self.msleep(100)
+                continue
+            ok, frame = capture.read()
+            if not ok:
+                self.msleep(10)
+                continue
+            self.frameCaptured.emit(frame)
+        self._release_capture()
+        with self._lock:
+            self._should_stop = False
+            self._pending_index = None
+
+    def _open_capture(self, index: int) -> None:
+        self._release_capture()
+        capture = self._create_capture(index)
+        if capture is None:
+            return
+        self._capture = capture
+
+    def _release_capture(self) -> None:
+        if self._capture is not None:
+            self._capture.release()
+            self._capture = None
+
+    @staticmethod
+    def _create_capture(index: int) -> cv2.VideoCapture | None:
+        backends: list[int] = []
+        if hasattr(cv2, "CAP_MSMF"):
+            backends.append(cv2.CAP_MSMF)
+        if hasattr(cv2, "CAP_DSHOW"):
+            backends.append(cv2.CAP_DSHOW)
+        backends.append(cv2.CAP_ANY)
+        for backend in backends:
+            cap = cv2.VideoCapture(index, backend)
+            if cap.isOpened():
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+                return cap
+            cap.release()
+        return None
+
+
 class Core(QObject):  # type: ignore
-    OnSensorFeedUpdate = Signal(QPixmap)
     OnAnalyserUpdate = Signal(list)
     OnSubsampleProgressUpdate = Signal(list)
     OnSampleComplete = Signal()
@@ -72,9 +150,6 @@ class Core(QObject):  # type: ignore
     def __init__(self) -> None:
         super().__init__()
 
-        self.pixmap = None  # pixmap used for the camera feed
-        self.histo = None  # histogram values used in analyser
-        self.camera = QCamera()  # camera being used
         self.centre = 0.0  # The found centre of the histogram
         self.zero = 0.0  # The zero point
         self.analyser_widget_height = 0  # The height of the widget so we can calculate the offset
@@ -91,11 +166,15 @@ class Core(QObject):  # type: ignore
 
         # Frame worker
         self.workerThread = QThread()
-        self.captureSession = QMediaCaptureSession()
         self.frameSender = FrameSender()
         self.frameWorker = FrameWorker(parent_obj=self)
         self.frameWorker.moveToThread(self.workerThread)
         self.workerThread.start()
+        self.frameSender.OnFrameChanged.connect(self.frameWorker.process_frame)
+
+        # Capture thread
+        self.capture_thread = OpenCVCaptureThread()
+        self.capture_thread.frameCaptured.connect(self.on_frame_captured)
 
         # Sample worker
         self.sample_worker = SampleWorker()
@@ -105,9 +184,11 @@ class Core(QObject):  # type: ignore
         self.sample_worker.moveToThread(self.sampleWorkerThread)
         self.sampleWorkerThread.start()
 
-        self.captureSession.setVideoSink(QVideoSink(self))
-        self.captureSession.videoSink().videoFrameChanged.connect(self.onFramePassedFromCamera)
-        self.frameSender.OnFrameChanged.connect(self.frameWorker.setVideoFrame)
+        self._camera_indices = self._enumerate_cameras()
+        if not self._camera_indices:
+            self._camera_indices = [0]
+        self._camera_names = self._resolve_camera_names(self._camera_indices)
+        self.capture_thread.start_capture(self._camera_indices[0])
 
     def delete_sample(self, index: int) -> None:
         debug = False
@@ -161,31 +242,19 @@ class Core(QObject):  # type: ignore
         self.setting_zero_sample = zero
         self.sample_worker.start(self.subsamples, self.outliers)
 
-    @Slot(QVideoFrame)  # type: ignore
-    def onFramePassedFromCamera(self, frame: QVideoFrame):
+    @Slot(object)  # type: ignore[arg-type]
+    def on_frame_captured(self, frame: np.ndarray) -> None:
         if self.frameWorker.ready:
             self.frameSender.OnFrameChanged.emit(frame)
 
     def get_cameras(self) -> list[str]:
-        cams = []
-        for cam in QMediaDevices.videoInputs():
-            cams.append(cam.description())
-
-        return cams
+        return self._camera_names.copy()
 
     def set_camera(self, index: int) -> None:
-        if self.camera:
-            self.camera.stop()
-
-        available_cameras = QMediaDevices.videoInputs()
-        if not available_cameras:
+        if index < 0 or index >= len(self._camera_indices):
             return
-
-        camera_info = available_cameras[index]
-        self.camera = QCamera(cameraDevice=camera_info, parent=self)
-
-        self.captureSession.setCamera(self.camera)
-        self.camera.start()
+        device_index = self._camera_indices[index]
+        self.capture_thread.set_device(device_index)
 
     def shutdown(self) -> None:
         """Stop capture and worker threads safely to allow application exit."""
@@ -195,18 +264,15 @@ class Core(QObject):  # type: ignore
         self.shutting_down = True
 
         try:
-            self.captureSession.videoSink().videoFrameChanged.disconnect(self.onFramePassedFromCamera)
+            self.capture_thread.frameCaptured.disconnect(self.on_frame_captured)
         except Exception:
             pass
-        try:
-            self.frameSender.OnFrameChanged.disconnect(self.frameWorker.setVideoFrame)
-        except Exception:
-            pass
+        self.capture_thread.stop()
 
-        if self.camera and self.camera.isActive():
-            self.camera.stop()
-        self.captureSession.setCamera(None)
-        self.captureSession.setVideoSink(None)
+        try:
+            self.frameSender.OnFrameChanged.disconnect(self.frameWorker.process_frame)
+        except Exception:
+            pass
 
         self.workerThread.requestInterruption()
         self.workerThread.quit()
@@ -220,3 +286,24 @@ class Core(QObject):  # type: ignore
             self.sampleWorkerThread.wait()
 
         self.shutting_down = False
+
+    def _enumerate_cameras(self, max_devices: int = 5) -> List[int]:
+        found: List[int] = []
+        for index in range(max_devices):
+            capture = OpenCVCaptureThread._create_capture(index)
+            if capture is not None:
+                found.append(index)
+                capture.release()
+        return found
+
+    def _resolve_camera_names(self, indices: List[int]) -> List[str]:
+        qt_devices = list(QMediaDevices.videoInputs())
+        if not qt_devices:
+            return [f"Camera {idx}" for idx in indices]
+        names: List[str] = []
+        for pos, idx in enumerate(indices):
+            if pos < len(qt_devices):
+                names.append(qt_devices[pos].description())
+            else:
+                names.append(f"Camera {idx}")
+        return names

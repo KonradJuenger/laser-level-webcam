@@ -4,6 +4,6 @@ PySide6-Addons>=6.5.1.1
 PySide6-Essentials>=6.5.1.1
 scipy>=1.7.3
 qdarktheme>=2.1.0
-qimage2ndarray>=1.10.0
 matplotlib>=3.5.3
 plotly
+opencv-python>=4.10.0
