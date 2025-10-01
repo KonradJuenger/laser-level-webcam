@@ -144,6 +144,7 @@ class FrameWorker(QObject):  # type: ignore
         self.threshold_enabled = False
         self.threshold_value = 0.0
         self._timing_samples = {key: deque(maxlen=120) for key in self.TIMING_KEYS}
+        self.padding_mode = 'zeros'
         self._timing_frames = 0
         self._timing_last_log = time.perf_counter()
         self._timing_base_enabled = bool(self.ENABLE_TIMING)
@@ -175,6 +176,13 @@ class FrameWorker(QObject):  # type: ignore
     @Slot(bool)
     def set_threshold_enabled(self, enabled: bool) -> None:
         self.threshold_enabled = bool(enabled)
+
+    @Slot(str)
+    def set_padding_mode(self, mode: str) -> None:
+        if mode in {'zeros', 'edge', 'reflect'}:
+            self.padding_mode = mode
+        else:
+            self.padding_mode = 'zeros'
 
     @Slot(int)
     def set_threshold_value(self, value: int) -> None:
@@ -267,7 +275,9 @@ class FrameWorker(QObject):  # type: ignore
 
         plane_mean = plane.mean(axis=0)
         pad_width = plane_mean.size
-        padded = np.pad(plane_mean, pad_width, mode='constant', constant_values=0.0)
+        pad_mode = 'constant' if self.padding_mode == 'zeros' else ('edge' if self.padding_mode == 'edge' else 'reflect')
+        pad_kwargs = {'constant_values': 0.0} if pad_mode == 'constant' else {}
+        padded = np.pad(plane_mean, pad_width, mode=pad_mode, **pad_kwargs)
         histo = np.convolve(padded, self._kernel, mode="same")
         histo = histo[pad_width:pad_width + plane_mean.size]
         histo = np.nan_to_num(histo)

@@ -155,6 +155,9 @@ class MainWindow(QMainWindow):  # type: ignore
         self.threshold_spin.setToolTip("Threshold value (0-255).")
         self.threshold_spin.setRange(0, 255)
         self.threshold_spin.setEnabled(False)
+        self.padding_combo = QComboBox()
+        self.padding_combo.addItems(['Zero (Black)', 'Edge Replicate', 'Reflect'])
+        self.padding_combo.setToolTip('Select padding strategy for smoothing.')
         self.measure_mode_combo = QComboBox()
         self.measure_mode_combo.addItems(["Gaussian Peak", "Edge Midpoint"])
         self.measure_mode_combo.setToolTip("Select how the beam position is detected.")
@@ -164,6 +167,7 @@ class MainWindow(QMainWindow):  # type: ignore
         analyser_form.addRow("Measurement Mode", self.measure_mode_combo)
         analyser_form.addRow("Smoothing", self.smoothing)
         analyser_form.addRow(self.threshold_checkbox, self.threshold_spin)
+        analyser_form.addRow('Padding', self.padding_combo)
         analyser_layout.addWidget(self.analyser_widget)
         analyser_layout.addLayout(analyser_form)
         self.log_perf_button = QPushButton("Log Perf (3s)")
@@ -263,6 +267,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.smoothing.valueChanged.connect(self.smoothing_value)
         self.threshold_checkbox.toggled.connect(self.on_threshold_toggled)
         self.threshold_spin.valueChanged.connect(self.core.frameWorker.set_threshold_value)
+        self.padding_combo.currentTextChanged.connect(self.on_padding_changed)
         self.subsamples_spin.valueChanged.connect(lambda value: setattr(self.core, "subsamples", value))
         self.outlier_spin.valueChanged.connect(lambda value: setattr(self.core, "outliers", value))
         self.units_combo.currentTextChanged.connect(self.core.set_units)
@@ -292,6 +297,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.core.frameWorker.set_channel(self.channel_combo.currentText())
         self.core.frameWorker.set_measurement_mode(self.measure_mode_combo.currentText())
         self.core.frameWorker.set_threshold_value(self.threshold_spin.value())
+        self.core.frameWorker.set_padding_mode(self._padding_mode_key(self.padding_combo.currentText()))
         self.on_threshold_toggled(self.threshold_checkbox.isChecked())
 
         # Trigger the state of things
@@ -319,6 +325,11 @@ class MainWindow(QMainWindow):  # type: ignore
         if settings.contains("threshold_enabled"):
             enabled = settings.value("threshold_enabled", False, type=bool)
             self.threshold_checkbox.setChecked(bool(enabled))
+        if settings.contains("padding_mode"):
+            mode_text = settings.value("padding_mode")
+            index = self.padding_combo.findText(self._padding_mode_label(mode_text))
+            if index != -1:
+                self.padding_combo.setCurrentIndex(index)
         if settings.contains("units"):
             self.units_combo.setCurrentIndex(int(settings.value("units")))
         if settings.contains("channel"):
@@ -370,6 +381,28 @@ class MainWindow(QMainWindow):  # type: ignore
         if not channel:
             return
         self.core.frameWorker.set_channel(channel)
+
+    def on_padding_changed(self, label: str) -> None:
+        key = self._padding_mode_key(label)
+        self.core.frameWorker.set_padding_mode(key)
+
+    @staticmethod
+    def _padding_mode_key(label: str) -> str:
+        mapping = {
+            'Zero (Black)': 'zeros',
+            'Edge Replicate': 'edge',
+            'Reflect': 'reflect',
+        }
+        return mapping.get(label, 'zeros')
+
+    @staticmethod
+    def _padding_mode_label(key: str) -> str:
+        mapping = {
+            'zeros': 'Zero (Black)',
+            'edge': 'Edge Replicate',
+            'reflect': 'Reflect',
+        }
+        return mapping.get(key, 'Zero (Black)')
 
     def on_threshold_toggled(self, enabled: bool) -> None:
         self.threshold_spin.setEnabled(enabled)
@@ -605,6 +638,7 @@ class MainWindow(QMainWindow):  # type: ignore
         self.settings.setValue("outlier", self.outlier_spin.value())
         self.settings.setValue("threshold_enabled", self.threshold_checkbox.isChecked())
         self.settings.setValue("threshold_value", self.threshold_spin.value())
+        self.settings.setValue("padding_mode", self._padding_mode_key(self.padding_combo.currentText()))
         self.settings.setValue("units", self.units_combo.currentIndex())
         self.settings.setValue("channel", self.channel_combo.currentText())
         self.settings.setValue("measurement_mode", self.measure_mode_combo.currentText())
